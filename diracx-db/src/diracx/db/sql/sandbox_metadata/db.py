@@ -2,31 +2,45 @@ from __future__ import annotations
 
 from typing import Any
 
-import sqlalchemy
+from sqlalchemy import Executable, delete, insert, literal, select, update
+from sqlalchemy.exc import IntegrityError, NoResultFound
 
+from diracx.core.exceptions import (
+    SandboxAlreadyAssignedError,
+    SandboxAlreadyInsertedError,
+    SandboxNotFoundError,
+)
 from diracx.core.models import SandboxInfo, SandboxType, UserInfo
-from diracx.db.sql.utils import BaseSQLDB, utcnow
+from diracx.db.sql.utils.base import BaseSQLDB
+from diracx.db.sql.utils.functions import utcnow
 
 from .schema import Base as SandboxMetadataDBBase
-from .schema import sb_EntityMapping, sb_Owners, sb_SandBoxes
+from .schema import SandBoxes, SBEntityMapping, SBOwners
 
 
 class SandboxMetadataDB(BaseSQLDB):
     metadata = SandboxMetadataDBBase.metadata
 
-    async def upsert_owner(self, user: UserInfo) -> int:
+    async def get_owner_id(self, user: UserInfo) -> int | None:
         """Get the id of the owner from the database."""
-        # TODO: Follow https://github.com/DIRACGrid/diracx/issues/49
-        stmt = sqlalchemy.select(sb_Owners.OwnerID).where(
-            sb_Owners.Owner == user.preferred_username,
-            sb_Owners.OwnerGroup == user.dirac_group,
-            sb_Owners.VO == user.vo,
+        stmt = select(SBOwners.OwnerID).where(
+            SBOwners.Owner == user.preferred_username,
+            SBOwners.OwnerGroup == user.dirac_group,
+            SBOwners.VO == user.vo,
         )
-        result = await self.conn.execute(stmt)
-        if owner_id := result.scalar_one_or_none():
-            return owner_id
+        return (await self.conn.execute(stmt)).scalar_one_or_none()
 
-        stmt = sqlalchemy.insert(sb_Owners).values(
+    async def get_sandbox_owner_id(self, pfn: str, se_name: str) -> int | None:
+        """Get the id of the owner of a sandbox."""
+        stmt = select(SBOwners.OwnerID).where(
+            SBOwners.OwnerID == SandBoxes.OwnerId,
+            SandBoxes.SEName == se_name,
+            SandBoxes.SEPFN == pfn,
+        )
+        return (await self.conn.execute(stmt)).scalar_one_or_none()
+
+    async def insert_owner(self, user: UserInfo) -> int:
+        stmt = insert(SBOwners).values(
             Owner=user.preferred_username,
             OwnerGroup=user.dirac_group,
             VO=user.vo,
@@ -48,12 +62,10 @@ class SandboxMetadataDB(BaseSQLDB):
         return "/" + "/".join(parts)
 
     async def insert_sandbox(
-        self, se_name: str, user: UserInfo, pfn: str, size: int
+        self, owner_id: int, se_name: str, pfn: str, size: int
     ) -> None:
         """Add a new sandbox in SandboxMetadataDB."""
-        # TODO: Follow https://github.com/DIRACGrid/diracx/issues/49
-        owner_id = await self.upsert_owner(user)
-        stmt = sqlalchemy.insert(sb_SandBoxes).values(
+        stmt = insert(SandBoxes).values(
             OwnerId=owner_id,
             SEName=se_name,
             SEPFN=pfn,
@@ -62,28 +74,30 @@ class SandboxMetadataDB(BaseSQLDB):
             LastAccessTime=utcnow(),
         )
         try:
-            result = await self.conn.execute(stmt)
-        except sqlalchemy.exc.IntegrityError:
-            await self.update_sandbox_last_access_time(se_name, pfn)
-        else:
-            assert result.rowcount == 1
+            await self.conn.execute(stmt)
+        except IntegrityError as e:
+            raise SandboxAlreadyInsertedError(pfn, se_name) from e
 
     async def update_sandbox_last_access_time(self, se_name: str, pfn: str) -> None:
         stmt = (
-            sqlalchemy.update(sb_SandBoxes)
-            .where(sb_SandBoxes.SEName == se_name, sb_SandBoxes.SEPFN == pfn)
+            update(SandBoxes)
+            .where(SandBoxes.SEName == se_name, SandBoxes.SEPFN == pfn)
             .values(LastAccessTime=utcnow())
         )
         result = await self.conn.execute(stmt)
         assert result.rowcount == 1
 
-    async def sandbox_is_assigned(self, pfn: str, se_name: str) -> bool:
+    async def sandbox_is_assigned(self, pfn: str, se_name: str) -> bool | None:
         """Checks if a sandbox exists and has been assigned."""
-        stmt: sqlalchemy.Executable = sqlalchemy.select(sb_SandBoxes.Assigned).where(
-            sb_SandBoxes.SEName == se_name, sb_SandBoxes.SEPFN == pfn
+        stmt: Executable = select(SandBoxes.Assigned).where(
+            SandBoxes.SEName == se_name, SandBoxes.SEPFN == pfn
         )
         result = await self.conn.execute(stmt)
-        is_assigned = result.scalar_one()
+        try:
+            is_assigned = result.scalar_one()
+        except NoResultFound as e:
+            raise SandboxNotFoundError(pfn, se_name) from e
+
         return is_assigned
 
     @staticmethod
@@ -97,11 +111,11 @@ class SandboxMetadataDB(BaseSQLDB):
         """Get the sandbox assign to job."""
         entity_id = self.jobid_to_entity_id(job_id)
         stmt = (
-            sqlalchemy.select(sb_SandBoxes.SEPFN)
-            .where(sb_SandBoxes.SBId == sb_EntityMapping.SBId)
+            select(SandBoxes.SEPFN)
+            .where(SandBoxes.SBId == SBEntityMapping.SBId)
             .where(
-                sb_EntityMapping.EntityId == entity_id,
-                sb_EntityMapping.Type == sb_type,
+                SBEntityMapping.EntityId == entity_id,
+                SBEntityMapping.Type == sb_type,
             )
         )
         result = await self.conn.execute(stmt)
@@ -118,54 +132,58 @@ class SandboxMetadataDB(BaseSQLDB):
         for job_id in jobs_ids:
             # Define the entity id as 'Entity:entity_id' due to the DB definition:
             entity_id = self.jobid_to_entity_id(job_id)
-            select_sb_id = sqlalchemy.select(
-                sb_SandBoxes.SBId,
-                sqlalchemy.literal(entity_id).label("EntityId"),
-                sqlalchemy.literal(sb_type).label("Type"),
+            select_sb_id = select(
+                SandBoxes.SBId,
+                literal(entity_id).label("EntityId"),
+                literal(sb_type).label("Type"),
             ).where(
-                sb_SandBoxes.SEName == se_name,
-                sb_SandBoxes.SEPFN == pfn,
+                SandBoxes.SEName == se_name,
+                SandBoxes.SEPFN == pfn,
             )
-            stmt = sqlalchemy.insert(sb_EntityMapping).from_select(
+            stmt = insert(SBEntityMapping).from_select(
                 ["SBId", "EntityId", "Type"], select_sb_id
             )
-            await self.conn.execute(stmt)
+            try:
+                await self.conn.execute(stmt)
+            except IntegrityError as e:
+                raise SandboxAlreadyAssignedError(pfn, se_name) from e
 
-            stmt = (
-                sqlalchemy.update(sb_SandBoxes)
-                .where(sb_SandBoxes.SEPFN == pfn)
-                .values(Assigned=True)
-            )
+            stmt = update(SandBoxes).where(SandBoxes.SEPFN == pfn).values(Assigned=True)
             result = await self.conn.execute(stmt)
+            if result.rowcount == 0:
+                # If the update didn't affect any row, the sandbox doesn't exist
+                # It means the previous insert didn't have any effect
+                raise SandboxNotFoundError(pfn, se_name)
+
             assert result.rowcount == 1
 
     async def unassign_sandboxes_to_jobs(self, jobs_ids: list[int]) -> None:
         """Delete mapping between jobs and sandboxes."""
         for job_id in jobs_ids:
             entity_id = self.jobid_to_entity_id(job_id)
-            sb_sel_stmt = sqlalchemy.select(sb_SandBoxes.SBId)
+            sb_sel_stmt = select(SandBoxes.SBId)
             sb_sel_stmt = sb_sel_stmt.join(
-                sb_EntityMapping, sb_EntityMapping.SBId == sb_SandBoxes.SBId
+                SBEntityMapping, SBEntityMapping.SBId == SandBoxes.SBId
             )
-            sb_sel_stmt = sb_sel_stmt.where(sb_EntityMapping.EntityId == entity_id)
+            sb_sel_stmt = sb_sel_stmt.where(SBEntityMapping.EntityId == entity_id)
 
             result = await self.conn.execute(sb_sel_stmt)
             sb_ids = [row.SBId for row in result]
 
-            del_stmt = sqlalchemy.delete(sb_EntityMapping).where(
-                sb_EntityMapping.EntityId == entity_id
+            del_stmt = delete(SBEntityMapping).where(
+                SBEntityMapping.EntityId == entity_id
             )
             await self.conn.execute(del_stmt)
 
-            sb_entity_sel_stmt = sqlalchemy.select(sb_EntityMapping.SBId).where(
-                sb_EntityMapping.SBId.in_(sb_ids)
+            sb_entity_sel_stmt = select(SBEntityMapping.SBId).where(
+                SBEntityMapping.SBId.in_(sb_ids)
             )
             result = await self.conn.execute(sb_entity_sel_stmt)
             remaining_sb_ids = [row.SBId for row in result]
             if not remaining_sb_ids:
                 unassign_stmt = (
-                    sqlalchemy.update(sb_SandBoxes)
-                    .where(sb_SandBoxes.SBId.in_(sb_ids))
+                    update(SandBoxes)
+                    .where(SandBoxes.SBId.in_(sb_ids))
                     .values(Assigned=False)
                 )
                 await self.conn.execute(unassign_stmt)

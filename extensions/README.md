@@ -4,16 +4,25 @@
 `gubbins` is a `diracx` extension. It is a show-case for everything which is possible to extend.
 
 It should also serve as a reference doc on how to write your own extension. Everything in the `diracx` dev documentation applies here too.
-
 If you write your own extension, just replace `gubbins` with whatever name you chose (e.g. `lhcbdiracx`, `belle2diracx`, `donotforgetgriddpp`).
-
 The structure of the repo, the content of the `pyproject.toml` files, the `__init__` of the modules... are all skeletons that you must reproduce.
+It is not required to reproduce all submodules (e.g. you can have `myextension-cli` without having any other components).
 
-Extensions are controled via:
-* the `DIRACX_EXTENSIONS` environment variable. It should be set to `gubbins,diracx`
-* the entrypoints found in the various `pyproject.toml`
+Most functionality is managed via entrypoints in the various `pyproject.toml` files.
+The only essential one to have is:
 
-This here is the exhaustive list of what is supported and tested for extensions. Any usecase not listed here is not supported.
+```toml
+[project.entry-points."diracx"]
+extension = "myextension"
+```
+
+We recommend putting this in `myextension-core` however it is possible to include it any of your packages.
+It is also acceptably to include it in multiple packages.
+
+This here is the exhaustive list of what is supported and tested for extensions.
+Any use cases not listed here are not supported, if you think you need additional functionality please open an issue to discuss so it can be added here to assist with long term stability.
+
+NOTE: This documentation is still a work in progress!!!
 
 
 ## QUESTIONS
@@ -22,9 +31,6 @@ What to do with the `environment.yaml` ? should we replicate wht's in diracx ?
 
 
 ## General statements
-
-When working with the extension, you MUST always (server, client, testing) have exported the environment variable ``DIRACX_EXTENSIONS=gubbins,diracx``. The [``pytest fixture``](extensions/gubbins/gubbins-testing/src/gubbins/testing/__init__.py)
-
 
 The fact of having `gubbins` as a subfolder has a few downside which you will not suffer if having your extension in a separate repository:
 * the `root` of `setuptools_scm` in the various `pyproject.toml` will only be `..` for your extension
@@ -109,19 +115,22 @@ The requirements are the following:
 
 To create a client extension:
 * mirror the structure of the `diracx-client`
-* Generate a client in `generated` using `Autorest`
+* Generate a client in `generated` using `Autorest` For this the best is to have a temporary router test writing the `openapi.json` somewhere
+```python
+r = normal_user_client.get("/api/openapi.json")
+with open('/tmp/openapi.json', 'wt') as f:
+    json.dump(r.json(), f, indent=2)
+```
+* The autorest command then looks something like
+```bash
+autorest --python --input-file=/tmp/openapi.json --models-mode=msrest --namespace=generated --output-folder=gubbins-client/src/gubbins/
+```
+
 * Create the `patches` directory, simply exporting the generated `clients`(both [sync](gubbins/gubbins-client/src/gubbins/client/patches/__init__.py) and [async](gubbins/gubbins-client/src/gubbins/client/patches/aio/__init__.py))
 * Define the base modules to export what is needed
 * The [top init](gubbins/gubbins-client/src/gubbins/client/__init__.py) MUST have
 ```python
 import diracx.client
-```
-* Redefine the entrypoint
-
-```toml
-[project.entry-points."diracx"]
-client_class = "gubbins.client.generated._client:Dirac"
-aio_client_class = "gubbins.client.generated.aio._client:Dirac"
 ```
 
 * Generate the autorest client (see CI `regenerate_client`)
@@ -191,7 +200,7 @@ properties_module = "gubbins.core.properties"
 
 ## Writing tests
 
-`diracx-testing` package contains a lot of useful tools for testing `diracx` and its extensions. It is recommended to have a `testing` package for your extension which contains at least a check that your `DIRACX_EXTENSIONS` environment variable is set (see [example](gubbins/gubbins-testing/src/gubbins/testing/__init__.py))
+`diracx-testing` package contains a lot of useful tools for testing `diracx` and its extensions.
 
 Note that even if you have your own `testing` package depending on `diracx-testing`, you should specify it when calling `pytest` (see various `pyprojects.toml`)
 

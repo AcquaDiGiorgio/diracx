@@ -61,7 +61,7 @@ Usage example:
 
 ```python
 @router.get("/openid-configuration")
-async def openid_configuration(settings: AuthSettings):
+async def get_openid_configuration(settings: AuthSettings):
     ...
 ```
 
@@ -149,8 +149,8 @@ The various policies are defined in `diracx-routers/pyproject.toml`:
 
 ```toml
 [project.entry-points."diracx.access_policies"]
-WMSAccessPolicy = "diracx.routers.job_manager.access_policies:WMSAccessPolicy"
-SandboxAccessPolicy = "diracx.routers.job_manager.access_policies:SandboxAccessPolicy"
+WMSAccessPolicy = "diracx.routers.jobs.access_policies:WMSAccessPolicy"
+SandboxAccessPolicy = "diracx.routers.jobs.access_policies:SandboxAccessPolicy"
 ```
 
 Each route must have a policy as an argument and call it:
@@ -159,7 +159,7 @@ Each route must have a policy as an argument and call it:
 from .access_policies import ActionType, CheckWMSPolicyCallable
 
 @router.post("/")
-async def submit_bulk_jobs(
+async def submit_jobs(
     job_definitions: Annotated[list[str], Body()],
     job_db: JobDB,
     check_permissions: CheckWMSPolicyCallable,

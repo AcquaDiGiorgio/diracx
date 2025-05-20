@@ -1,28 +1,22 @@
 from __future__ import annotations
 
-import logging
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+__all__ = ["JobDB"]
 
-from sqlalchemy import bindparam, delete, func, insert, select, update
-from sqlalchemy.exc import IntegrityError, NoResultFound
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Iterable
+
+from sqlalchemy import bindparam, case, delete, func, insert, select, update
 
 if TYPE_CHECKING:
     from sqlalchemy.sql.elements import BindParameter
 
-from diracx.core.exceptions import InvalidQueryError, JobNotFound
-from diracx.core.models import (
-    JobMinorStatus,
-    JobStatus,
-    LimitedJobStatusReturn,
-    ScalarSearchOperator,
-    ScalarSearchSpec,
-    SearchSpec,
-    SortSpec,
-)
+from diracx.core.exceptions import InvalidQueryError
+from diracx.core.models import JobCommand, SearchSpec, SortSpec
 
 from ..utils import BaseSQLDB, apply_search_filters, apply_sort_constraints
+from ..utils.functions import utcnow
 from .schema import (
+    HeartBeatLoggingInfo,
     InputData,
     JobCommands,
     JobDBBase,
@@ -45,20 +39,26 @@ def _get_columns(table, parameters):
 class JobDB(BaseSQLDB):
     metadata = JobDBBase.metadata
 
+    # Field names which should be stored in the HeartBeatLoggingInfo table
+    heartbeat_fields = {
+        "LoadAverage",
+        "MemoryUsed",
+        "Vsize",
+        "AvailableDiskSpace",
+        "CPUConsumed",
+        "WallClockTime",
+    }
+
     # TODO: this is copied from the DIRAC JobDB
     # but is overwriten in LHCbDIRAC, so we need
     # to find a way to make it dynamic
-    jdl2DBParameters = ["JobName", "JobType", "JobGroup"]
-
-    # TODO: set maxRescheduling value from CS
-    # maxRescheduling = self.getCSOption("MaxRescheduling", 3)
-    # For now:
-    maxRescheduling = 3
+    jdl_2_db_parameters = ["JobName", "JobType", "JobGroup"]
 
     async def summary(self, group_by, search) -> list[dict[str, str | int]]:
+        """Get a summary of the jobs."""
         columns = _get_columns(Jobs.__table__, group_by)
 
-        stmt = select(*columns, func.count(Jobs.JobID).label("count"))
+        stmt = select(*columns, func.count(Jobs.job_id).label("count"))
         stmt = apply_search_filters(Jobs.__table__.columns.__getitem__, stmt, search)
         stmt = stmt.group_by(*columns)
 
@@ -79,8 +79,10 @@ class JobDB(BaseSQLDB):
         per_page: int = 100,
         page: int | None = None,
     ) -> tuple[int, list[dict[Any, Any]]]:
+        """Search for jobs in the database."""
         # Find which columns to select
         columns = _get_columns(Jobs.__table__, parameters)
+
         stmt = select(*columns)
 
         stmt = apply_search_filters(Jobs.__table__.columns.__getitem__, stmt, search)
@@ -107,354 +109,140 @@ class JobDB(BaseSQLDB):
             dict(row._mapping) async for row in (await self.conn.stream(stmt))
         ]
 
-    async def _insertNewJDL(self, jdl) -> int:
-        from DIRAC.WorkloadManagementSystem.DB.JobDBUtils import compressJDL
-
-        stmt = insert(JobJDLs).values(
-            JDL="", JobRequirements="", OriginalJDL=compressJDL(jdl)
+    async def create_job(self, compressed_original_jdl: str):
+        """Used to insert a new job with original JDL. Returns inserted job id."""
+        result = await self.conn.execute(
+            JobJDLs.__table__.insert().values(
+                JDL="",
+                JobRequirements="",
+                OriginalJDL=compressed_original_jdl,
+            )
         )
-        result = await self.conn.execute(stmt)
-        # await self.engine.commit()
         return result.inserted_primary_key[0]
-
-    async def _insertJob(self, jobData: dict[str, Any]):
-        stmt = insert(Jobs).values(jobData)
-        await self.conn.execute(stmt)
-
-    async def _insertInputData(self, job_id: int, lfns: list[str]):
-        stmt = insert(InputData).values([{"JobID": job_id, "LFN": lfn} for lfn in lfns])
-        await self.conn.execute(stmt)
-
-    async def setJobAttributes(self, job_id, jobData):
-        """TODO: add myDate and force parameters."""
-        if "Status" in jobData:
-            jobData = jobData | {"LastUpdateTime": datetime.now(tz=timezone.utc)}
-        stmt = update(Jobs).where(Jobs.JobID == job_id).values(jobData)
-        await self.conn.execute(stmt)
-
-    async def _checkAndPrepareJob(
-        self,
-        jobID,
-        class_ad_job,
-        class_ad_req,
-        owner,
-        owner_group,
-        job_attrs,
-        vo,
-    ):
-        """Check Consistency of Submitted JDL and set some defaults
-        Prepare subJDL with Job Requirements.
-        """
-        from DIRAC.Core.Utilities.DErrno import EWMSSUBM, cmpError
-        from DIRAC.Core.Utilities.ReturnValues import returnValueOrRaise
-        from DIRAC.WorkloadManagementSystem.DB.JobDBUtils import (
-            checkAndPrepareJob,
-        )
-
-        retVal = checkAndPrepareJob(
-            jobID,
-            class_ad_job,
-            class_ad_req,
-            owner,
-            owner_group,
-            job_attrs,
-            vo,
-        )
-
-        if not retVal["OK"]:
-            if cmpError(retVal, EWMSSUBM):
-                await self.setJobAttributes(jobID, job_attrs)
-
-            returnValueOrRaise(retVal)
-
-    async def setJobJDL(self, job_id, jdl):
-        from DIRAC.WorkloadManagementSystem.DB.JobDBUtils import compressJDL
-
-        stmt = (
-            update(JobJDLs).where(JobJDLs.JobID == job_id).values(JDL=compressJDL(jdl))
-        )
-        await self.conn.execute(stmt)
-
-    async def getJobJDL(self, job_id: int, original: bool = False) -> str:
-        from DIRAC.WorkloadManagementSystem.DB.JobDBUtils import extractJDL
-
-        if original:
-            stmt = select(JobJDLs.OriginalJDL).where(JobJDLs.JobID == job_id)
-        else:
-            stmt = select(JobJDLs.JDL).where(JobJDLs.JobID == job_id)
-
-        jdl = (await self.conn.execute(stmt)).scalar_one()
-        if jdl:
-            jdl = extractJDL(jdl)
-
-        return jdl
-
-    async def insert(
-        self,
-        jdl,
-        owner,
-        owner_group,
-        initial_status,
-        initial_minor_status,
-        vo,
-    ):
-        from DIRAC.Core.Utilities.ClassAd.ClassAdLight import ClassAd
-        from DIRAC.Core.Utilities.ReturnValues import returnValueOrRaise
-        from DIRAC.WorkloadManagementSystem.DB.JobDBUtils import (
-            checkAndAddOwner,
-            createJDLWithInitialStatus,
-            fixJDL,
-        )
-
-        job_attrs = {
-            "LastUpdateTime": datetime.now(tz=timezone.utc),
-            "SubmissionTime": datetime.now(tz=timezone.utc),
-            "Owner": owner,
-            "OwnerGroup": owner_group,
-            "VO": vo,
-        }
-
-        jobManifest = returnValueOrRaise(checkAndAddOwner(jdl, owner, owner_group))
-
-        jdl = fixJDL(jdl)
-
-        job_id = await self._insertNewJDL(jdl)
-
-        jobManifest.setOption("JobID", job_id)
-
-        job_attrs["JobID"] = job_id
-
-        # 2.- Check JDL and Prepare DIRAC JDL
-        jobJDL = jobManifest.dumpAsJDL()
-
-        # Replace the JobID placeholder if any
-        if jobJDL.find("%j") != -1:
-            jobJDL = jobJDL.replace("%j", str(job_id))
-
-        class_ad_job = ClassAd(jobJDL)
-        class_ad_req = ClassAd("[]")
-        if not class_ad_job.isOK():
-            job_attrs["Status"] = JobStatus.FAILED
-
-            job_attrs["MinorStatus"] = "Error in JDL syntax"
-
-            await self._insertJob(job_attrs)
-
-            return {
-                "JobID": job_id,
-                "Status": JobStatus.FAILED,
-                "MinorStatus": "Error in JDL syntax",
-            }
-
-        class_ad_job.insertAttributeInt("JobID", job_id)
-
-        await self._checkAndPrepareJob(
-            job_id,
-            class_ad_job,
-            class_ad_req,
-            owner,
-            owner_group,
-            job_attrs,
-            vo,
-        )
-
-        jobJDL = createJDLWithInitialStatus(
-            class_ad_job,
-            class_ad_req,
-            self.jdl2DBParameters,
-            job_attrs,
-            initial_status,
-            initial_minor_status,
-            modern=True,
-        )
-
-        await self.setJobJDL(job_id, jobJDL)
-
-        # Adding the job in the Jobs table
-        await self._insertJob(job_attrs)
-
-        # TODO: check if that is actually true
-        if class_ad_job.lookupAttribute("Parameters"):
-            raise NotImplementedError("Parameters in the JDL are not supported")
-
-        # Looking for the Input Data
-        inputData = []
-        if class_ad_job.lookupAttribute("InputData"):
-            inputData = class_ad_job.getListFromExpression("InputData")
-            lfns = [lfn for lfn in inputData if lfn]
-            if lfns:
-                await self._insertInputData(job_id, lfns)
-
-        return {
-            "JobID": job_id,
-            "Status": initial_status,
-            "MinorStatus": initial_minor_status,
-            "TimeStamp": datetime.now(tz=timezone.utc),
-        }
-
-    async def rescheduleJob(self, job_id) -> dict[str, Any]:
-        """Reschedule given job."""
-        from DIRAC.Core.Utilities.ClassAd.ClassAdLight import ClassAd
-        from DIRAC.Core.Utilities.ReturnValues import SErrorException
-
-        _, result = await self.search(
-            parameters=[
-                "Status",
-                "MinorStatus",
-                "VerifiedFlag",
-                "RescheduleCounter",
-                "Owner",
-                "OwnerGroup",
-            ],
-            search=[
-                ScalarSearchSpec(
-                    parameter="JobID", operator=ScalarSearchOperator.EQUAL, value=job_id
-                )
-            ],
-            sorts=[],
-        )
-        if not result:
-            raise ValueError(f"Job {job_id} not found.")
-
-        jobAttrs = result[0]
-
-        if "VerifiedFlag" not in jobAttrs:
-            raise ValueError(f"Job {job_id} not found in the system")
-
-        if not jobAttrs["VerifiedFlag"]:
-            raise ValueError(
-                f"Job {job_id} not Verified: Status {jobAttrs['Status']}, Minor Status: {jobAttrs['MinorStatus']}"
-            )
-
-        reschedule_counter = int(jobAttrs["RescheduleCounter"]) + 1
-
-        # TODO: update maxRescheduling:
-        # self.maxRescheduling = self.getCSOption("MaxRescheduling", self.maxRescheduling)
-
-        if reschedule_counter > self.maxRescheduling:
-            logging.warn(f"Job {job_id}: Maximum number of reschedulings is reached.")
-            self.setJobAttributes(
-                job_id,
-                {
-                    "Status": JobStatus.FAILED,
-                    "MinorStatus": JobMinorStatus.MAX_RESCHEDULING,
-                },
-            )
-            raise ValueError(
-                f"Maximum number of reschedulings is reached: {self.maxRescheduling}"
-            )
-
-        new_job_attributes = {"RescheduleCounter": reschedule_counter}
-
-        # TODO: get the job parameters from JobMonitoringClient
-        # result = JobMonitoringClient().getJobParameters(jobID)
-        # if result["OK"]:
-        #     parDict = result["Value"]
-        #     for key, value in parDict.get(jobID, {}).items():
-        #         result = self.setAtticJobParameter(jobID, key, value, rescheduleCounter - 1)
-        #         if not result["OK"]:
-        #             break
-
-        # TODO: IF we keep JobParameters and OptimizerParameters: Delete job in those tables.
-        # await self.delete_job_parameters(job_id)
-        # await self.delete_job_optimizer_parameters(job_id)
-
-        job_jdl = await self.getJobJDL(job_id, original=True)
-        if not job_jdl.strip().startswith("["):
-            job_jdl = f"[{job_jdl}]"
-
-        classAdJob = ClassAd(job_jdl)
-        classAdReq = ClassAd("[]")
-        retVal = {}
-        retVal["JobID"] = job_id
-
-        classAdJob.insertAttributeInt("JobID", job_id)
-
-        try:
-            result = await self._checkAndPrepareJob(
-                job_id,
-                classAdJob,
-                classAdReq,
-                jobAttrs["Owner"],
-                jobAttrs["OwnerGroup"],
-                new_job_attributes,
-                classAdJob.getAttributeString("VirtualOrganization"),
-            )
-        except SErrorException as e:
-            raise ValueError(e) from e
-
-        priority = classAdJob.getAttributeInt("Priority")
-        if priority is None:
-            priority = 0
-        jobAttrs["UserPriority"] = priority
-
-        siteList = classAdJob.getListFromExpression("Site")
-        if not siteList:
-            site = "ANY"
-        elif len(siteList) > 1:
-            site = "Multiple"
-        else:
-            site = siteList[0]
-
-        jobAttrs["Site"] = site
-
-        jobAttrs["Status"] = JobStatus.RECEIVED
-
-        jobAttrs["MinorStatus"] = JobMinorStatus.RESCHEDULED
-
-        jobAttrs["ApplicationStatus"] = "Unknown"
-
-        jobAttrs["LastUpdateTime"] = datetime.now(tz=timezone.utc)
-
-        jobAttrs["RescheduleTime"] = datetime.now(tz=timezone.utc)
-
-        reqJDL = classAdReq.asJDL()
-        classAdJob.insertAttributeInt("JobRequirements", reqJDL)
-
-        jobJDL = classAdJob.asJDL()
-
-        # Replace the JobID placeholder if any
-        jobJDL = jobJDL.replace("%j", str(job_id))
-
-        result = await self.setJobJDL(job_id, jobJDL)
-
-        result = await self.setJobAttributes(job_id, jobAttrs)
-
-        retVal["InputData"] = classAdJob.lookupAttribute("InputData")
-        retVal["RescheduleCounter"] = reschedule_counter
-        retVal["Status"] = JobStatus.RECEIVED
-        retVal["MinorStatus"] = JobMinorStatus.RESCHEDULED
-
-        return retVal
-
-    async def get_job_status(self, job_id: int) -> LimitedJobStatusReturn:
-        try:
-            stmt = select(Jobs.Status, Jobs.MinorStatus, Jobs.ApplicationStatus).where(
-                Jobs.JobID == job_id
-            )
-            return LimitedJobStatusReturn(
-                **dict((await self.conn.execute(stmt)).one()._mapping)
-            )
-        except NoResultFound as e:
-            raise JobNotFound(job_id) from e
-
-    async def set_job_command(self, job_id: int, command: str, arguments: str = ""):
-        """Store a command to be passed to the job together with the next heart beat."""
-        try:
-            stmt = insert(JobCommands).values(
-                JobID=job_id,
-                Command=command,
-                Arguments=arguments,
-                ReceptionTime=datetime.now(tz=timezone.utc),
-            )
-            await self.conn.execute(stmt)
-        except IntegrityError as e:
-            raise JobNotFound(job_id) from e
 
     async def delete_jobs(self, job_ids: list[int]):
         """Delete jobs from the database."""
-        stmt = delete(JobJDLs).where(JobJDLs.JobID.in_(job_ids))
+        stmt = delete(JobJDLs).where(JobJDLs.job_id.in_(job_ids))
         await self.conn.execute(stmt)
+
+    async def insert_input_data(self, lfns: dict[int, list[str]]):
+        """Insert input data for jobs."""
+        await self.conn.execute(
+            InputData.__table__.insert(),
+            [
+                {
+                    "JobID": job_id,
+                    "LFN": lfn,
+                }
+                for job_id, lfns_ in lfns.items()
+                for lfn in lfns_
+            ],
+        )
+
+    async def insert_job_attributes(self, jobs_to_update: dict[int, dict]):
+        """Insert the job attributes."""
+        await self.conn.execute(
+            Jobs.__table__.insert(),
+            [
+                {
+                    "JobID": job_id,
+                    **attrs,
+                }
+                for job_id, attrs in jobs_to_update.items()
+            ],
+        )
+
+    async def update_job_jdls(self, jdls_to_update: dict[int, str]):
+        """Used to update the JDL, typically just after inserting the original JDL, or rescheduling, for example."""
+        await self.conn.execute(
+            JobJDLs.__table__.update().where(
+                JobJDLs.__table__.c.JobID == bindparam("b_JobID")
+            ),
+            [
+                {
+                    "b_JobID": job_id,
+                    "JDL": compressed_jdl,
+                }
+                for job_id, compressed_jdl in jdls_to_update.items()
+            ],
+        )
+
+    @staticmethod
+    def _set_job_attributes_fix_value(column, value):
+        """Apply corrections to the values before inserting them into the database.
+
+        TODO: Move this logic into the sqlalchemy model.
+        """
+        if column == "VerifiedFlag":
+            value_str = str(value)
+            if value_str in ("True", "False"):
+                return value_str
+        if column == "AccountedFlag":
+            value_str = str(value)
+            if value_str in ("True", "False", "Failed"):
+                return value_str
+        else:
+            return value
+        raise NotImplementedError(f"Unrecognized value for column {column}: {value}")
+
+    async def set_job_attributes(self, job_data):
+        """Update the parameters of the given jobs."""
+        # TODO: add myDate and force parameters.
+        for job_id in job_data.keys():
+            if "Status" in job_data[job_id]:
+                job_data[job_id].update(
+                    {"LastUpdateTime": datetime.now(tz=timezone.utc)}
+                )
+        columns = set(key for attrs in job_data.values() for key in attrs.keys())
+        case_expressions = {
+            column: case(
+                *[
+                    (
+                        Jobs.__table__.c.JobID == job_id,
+                        self._set_job_attributes_fix_value(column, attrs[column]),
+                    )
+                    for job_id, attrs in job_data.items()
+                    if column in attrs
+                ],
+                else_=getattr(Jobs.__table__.c, column),  # Retain original value
+            )
+            for column in columns
+        }
+
+        stmt = (
+            Jobs.__table__.update()
+            .values(**case_expressions)
+            .where(Jobs.__table__.c.JobID.in_(job_data.keys()))
+        )
+        await self.conn.execute(stmt)
+
+    async def get_job_jdls(self, job_ids, original: bool = False) -> dict[int, str]:
+        """Get the JDLs for the given jobs."""
+        if original:
+            stmt = select(JobJDLs.job_id, JobJDLs.original_jdl).where(
+                JobJDLs.job_id.in_(job_ids)
+            )
+        else:
+            stmt = select(JobJDLs.job_id, JobJDLs.jdl).where(
+                JobJDLs.job_id.in_(job_ids)
+            )
+
+        return {jobid: jdl for jobid, jdl in (await self.conn.execute(stmt)) if jdl}
+
+    async def set_job_commands(self, commands: list[tuple[int, str, str]]) -> None:
+        """Store a command to be passed to the job together with the next heart beat."""
+        await self.conn.execute(
+            insert(JobCommands),
+            [
+                {
+                    "JobID": job_id,
+                    "Command": command,
+                    "Arguments": arguments,
+                    "ReceptionTime": datetime.now(tz=timezone.utc),
+                }
+                for job_id, command, arguments in commands
+            ],
+        )
 
     async def set_properties(
         self, properties: dict[int, dict[str, Any]], update_timestamp: bool = False
@@ -486,7 +274,62 @@ class JobDB(BaseSQLDB):
         if update_timestamp:
             values["LastUpdateTime"] = datetime.now(tz=timezone.utc)
 
-        stmt = update(Jobs).where(Jobs.JobID == bindparam("job_id")).values(**values)
+        stmt = update(Jobs).where(Jobs.job_id == bindparam("job_id")).values(**values)
         rows = await self.conn.execute(stmt, update_parameters)
 
         return rows.rowcount
+
+    async def add_heartbeat_data(
+        self, job_id: int, dynamic_data: dict[str, str]
+    ) -> None:
+        """Add the job's heartbeat data to the database.
+
+        NOTE: This does not update the HeartBeatTime column in the Jobs table.
+        This is instead handled by the `diracx.logic.jobs.status.set_job_statuses`
+        as it involves updating multiple databases.
+
+        :param job_id: the job id
+        :param dynamic_data: mapping of the dynamic data to store,
+            e.g. {"AvailableDiskSpace": 123}
+        """
+        if extra_fields := set(dynamic_data) - self.heartbeat_fields:
+            raise InvalidQueryError(
+                f"Not allowed to store heartbeat data for: {extra_fields}. "
+                f"Allowed keys are: {self.heartbeat_fields}"
+            )
+        values = [
+            {
+                "JobID": job_id,
+                "Name": key,
+                "Value": value,
+                "HeartBeatTime": utcnow(),
+            }
+            for key, value in dynamic_data.items()
+        ]
+        await self.conn.execute(HeartBeatLoggingInfo.__table__.insert().values(values))
+
+    async def get_job_commands(self, job_ids: Iterable[int]) -> list[JobCommand]:
+        """Get a command to be passed to the job together with the next heartbeat.
+
+        :param job_ids: the job ids
+        :return: mapping of job id to list of commands
+        """
+        # Get the commands
+        stmt = (
+            select(JobCommands.job_id, JobCommands.command, JobCommands.arguments)
+            .where(JobCommands.job_id.in_(job_ids), JobCommands.status == "Received")
+            .order_by(JobCommands.job_id)
+        )
+        commands = await self.conn.execute(stmt)
+        # Update the status of the commands
+        stmt = (
+            update(JobCommands)
+            .where(JobCommands.job_id.in_(job_ids))
+            .values(Status="Sent")
+        )
+        await self.conn.execute(stmt)
+        # Return the commands grouped by job id
+        return [
+            JobCommand(job_id=cmd.JobID, command=cmd.Command, arguments=cmd.Arguments)
+            for cmd in commands
+        ]

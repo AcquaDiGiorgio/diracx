@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import timezone
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import delete, func, select
 
 if TYPE_CHECKING:
     pass
 
-from diracx.core.exceptions import JobNotFound
+from collections import defaultdict
+
 from diracx.core.models import (
-    JobStatus,
+    JobLoggingRecord,
     JobStatusReturn,
 )
 
@@ -29,72 +30,88 @@ class JobLoggingDB(BaseSQLDB):
 
     metadata = JobLoggingDBBase.metadata
 
-    async def insert_record(
+    async def insert_records(
         self,
-        job_id: int,
-        status: JobStatus,
-        minor_status: str,
-        application_status: str,
-        date: datetime,
-        source: str,
+        records: list[JobLoggingRecord],
     ):
-        """Add a new entry to the JobLoggingDB table. One, two or all the three status
-        components (status, minorStatus, applicationStatus) can be specified.
-        Optionally the time stamp of the status can
-        be provided in a form of a string in a format '%Y-%m-%d %H:%M:%S' or
-        as datetime.datetime object. If the time stamp is not provided the current
-        UTC time is used.
-        """
-        # First, fetch the maximum SeqNum for the given job_id
-        seqnum_stmt = select(func.coalesce(func.max(LoggingInfo.SeqNum) + 1, 1)).where(
-            LoggingInfo.JobID == job_id
-        )
-        seqnum = await self.conn.scalar(seqnum_stmt)
+        """Bulk insert entries to the JobLoggingDB table."""
 
-        epoc = (
-            time.mktime(date.timetuple())
-            + date.microsecond / 1000000.0
-            - MAGIC_EPOC_NUMBER
+        def get_epoc(date):
+            return (
+                time.mktime(date.timetuple())
+                + date.microsecond / 1000000.0
+                - MAGIC_EPOC_NUMBER
+            )
+
+        # First, fetch the maximum SeqNums for the given job_ids
+        seqnum_stmt = (
+            select(
+                LoggingInfo.job_id, func.coalesce(func.max(LoggingInfo.seq_num) + 1, 1)
+            )
+            .where(LoggingInfo.job_id.in_([record.job_id for record in records]))
+            .group_by(LoggingInfo.job_id)
         )
 
-        stmt = insert(LoggingInfo).values(
-            JobID=int(job_id),
-            SeqNum=seqnum,
-            Status=status,
-            MinorStatus=minor_status,
-            ApplicationStatus=application_status[:255],
-            StatusTime=date,
-            StatusTimeOrder=epoc,
-            Source=source[:32],
-        )
-        await self.conn.execute(stmt)
+        seqnums = {
+            jid: seqnum for jid, seqnum in (await self.conn.execute(seqnum_stmt))
+        }
+        # IF a seqnum is not found, then assume it does not exist and the first sequence number is 1.
+        # https://docs.sqlalchemy.org/en/20/orm/queryguide/dml.html#orm-bulk-insert-statements
+        values = []
+        for record in records:
+            if record.job_id not in seqnums:
+                seqnums[record.job_id] = 1
 
-    async def get_records(self, job_id: int) -> list[JobStatusReturn]:
+            values.append(
+                {
+                    "JobID": record.job_id,
+                    "SeqNum": seqnums[record.job_id],
+                    "Status": record.status,
+                    "MinorStatus": record.minor_status,
+                    "ApplicationStatus": record.application_status[:255],
+                    "StatusTime": record.date,
+                    "StatusTimeOrder": get_epoc(record.date),
+                    "StatusSource": record.source[:32],
+                }
+            )
+            seqnums[record.job_id] = seqnums[record.job_id] + 1
+
+        await self.conn.execute(
+            LoggingInfo.__table__.insert(),
+            values,
+        )
+
+    async def get_records(self, job_ids: list[int]) -> dict[int, JobStatusReturn]:
         """Returns a Status,MinorStatus,ApplicationStatus,StatusTime,Source tuple
         for each record found for job specified by its jobID in historical order.
         """
+        # We could potentially use a group_by here, but we need to post-process the
+        # results later.
         stmt = (
             select(
-                LoggingInfo.Status,
-                LoggingInfo.MinorStatus,
-                LoggingInfo.ApplicationStatus,
-                LoggingInfo.StatusTime,
-                LoggingInfo.Source,
+                LoggingInfo.job_id,
+                LoggingInfo.status,
+                LoggingInfo.minor_status,
+                LoggingInfo.application_status,
+                LoggingInfo.status_time,
+                LoggingInfo.source,
             )
-            .where(LoggingInfo.JobID == int(job_id))
-            .order_by(LoggingInfo.StatusTimeOrder, LoggingInfo.StatusTime)
+            .where(LoggingInfo.job_id.in_(job_ids))
+            .order_by(LoggingInfo.status_time_order, LoggingInfo.status_time)
         )
         rows = await self.conn.execute(stmt)
 
-        values = []
+        values = defaultdict(list)
         for (
+            job_id,
             status,
             minor_status,
             application_status,
             status_time,
             status_source,
         ) in rows:
-            values.append(
+
+            values[job_id].append(
                 [
                     status,
                     minor_status,
@@ -106,16 +123,16 @@ class JobLoggingDB(BaseSQLDB):
 
         # If no value has been set for the application status in the first place,
         # We put this status to unknown
-        res = []
-        if values:
-            if values[0][2] == "idem":
-                values[0][2] = "Unknown"
+        res: dict = defaultdict(list)
+        for job_id, history in values.items():
+            if history[0][2] == "idem":
+                history[0][2] = "Unknown"
 
             # We replace "idem" values by the value previously stated
-            for i in range(1, len(values)):
+            for i in range(1, len(history)):
                 for j in range(3):
-                    if values[i][j] == "idem":
-                        values[i][j] = values[i - 1][j]
+                    if history[i][j] == "idem":
+                        history[i][j] = history[i - 1][j]
 
             # And we replace arrays with tuples
             for (
@@ -124,8 +141,8 @@ class JobLoggingDB(BaseSQLDB):
                 application_status,
                 status_time,
                 status_source,
-            ) in values:
-                res.append(
+            ) in history:
+                res[job_id].append(
                     JobStatusReturn(
                         Status=status,
                         MinorStatus=minor_status,
@@ -139,23 +156,24 @@ class JobLoggingDB(BaseSQLDB):
 
     async def delete_records(self, job_ids: list[int]):
         """Delete logging records for given jobs."""
-        stmt = delete(LoggingInfo).where(LoggingInfo.JobID.in_(job_ids))
+        stmt = delete(LoggingInfo).where(LoggingInfo.job_id.in_(job_ids))
         await self.conn.execute(stmt)
 
-    async def get_wms_time_stamps(self, job_id):
-        """Get TimeStamps for job MajorState transitions
-        return a {State:timestamp} dictionary.
+    async def get_wms_time_stamps(self, job_ids):
+        """Get TimeStamps for job MajorState transitions for multiple jobs at once
+        return a {JobID: {State:timestamp}} dictionary.
         """
-        result = {}
+        result = defaultdict(dict)
         stmt = select(
-            LoggingInfo.Status,
-            LoggingInfo.StatusTimeOrder,
-        ).where(LoggingInfo.JobID == job_id)
+            LoggingInfo.job_id,
+            LoggingInfo.status,
+            LoggingInfo.status_time_order,
+        ).where(LoggingInfo.job_id.in_(job_ids))
         rows = await self.conn.execute(stmt)
         if not rows.rowcount:
-            raise JobNotFound(job_id) from None
+            return {}
 
-        for event, etime in rows:
-            result[event] = str(etime + MAGIC_EPOC_NUMBER)
+        for job_id, event, etime in rows:
+            result[job_id][event] = str(etime + MAGIC_EPOC_NUMBER)
 
         return result

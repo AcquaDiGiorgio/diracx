@@ -16,7 +16,7 @@ from opensearchpy import AsyncOpenSearch
 
 from diracx.core.exceptions import InvalidQueryError
 from diracx.core.extensions import select_from_extension
-from diracx.db.exceptions import DBUnavailable
+from diracx.db.exceptions import DBUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ class OpenSearchDBError(Exception):
     pass
 
 
-class OpenSearchDBUnavailable(DBUnavailable, OpenSearchDBError):
+class OpenSearchDBUnavailableError(DBUnavailableError, OpenSearchDBError):
     pass
 
 
@@ -38,7 +38,7 @@ class BaseOSDB(metaclass=ABCMeta):
 
     The available OpenSearch databases are discovered by calling `BaseOSDB.available_urls`.
     This method returns a dictionary of database names to connection parameters.
-    The available databases are determined by the `diracx.db.os` entrypoint in
+    The available databases are determined by the `diracx.dbs.os` entrypoint in
     the `pyproject.toml` file and the connection parameters are taken from the
     environment variables prefixed with `DIRACX_OS_DB_{DB_NAME}`.
 
@@ -77,7 +77,7 @@ class BaseOSDB(metaclass=ABCMeta):
     index_prefix: str
 
     @abstractmethod
-    def index_name(self, doc_id: int) -> str: ...
+    def index_name(self, vo: str, doc_id: int) -> str: ...
 
     def __init__(self, connection_kwargs: dict[str, Any]) -> None:
         self._client: AsyncOpenSearch | None = None
@@ -92,7 +92,9 @@ class BaseOSDB(metaclass=ABCMeta):
         """Return the available implementations of the DB in reverse priority order."""
         db_classes: list[type[BaseOSDB]] = [
             entry_point.load()
-            for entry_point in select_from_extension(group="diracx.db.os", name=db_name)
+            for entry_point in select_from_extension(
+                group="diracx.dbs.os", name=db_name
+            )
         ]
         if not db_classes:
             raise NotImplementedError(f"Could not find any matches for {db_name=}")
@@ -106,7 +108,7 @@ class BaseOSDB(metaclass=ABCMeta):
         prefixed with ``DIRACX_OS_DB_{DB_NAME}``.
         """
         conn_kwargs: dict[str, dict[str, Any]] = {}
-        for entry_point in select_from_extension(group="diracx.db.os"):
+        for entry_point in select_from_extension(group="diracx.dbs.os"):
             db_name = entry_point.name
             var_name = f"DIRACX_OS_DB_{entry_point.name.upper()}"
             if var_name in os.environ:
@@ -152,7 +154,7 @@ class BaseOSDB(metaclass=ABCMeta):
         be ran at every query.
         """
         if not await self.client.ping():
-            raise OpenSearchDBUnavailable(
+            raise OpenSearchDBUnavailableError(
                 f"Failed to connect to {self.__class__.__qualname__}"
             )
 
@@ -180,15 +182,20 @@ class BaseOSDB(metaclass=ABCMeta):
         )
         assert result["acknowledged"]
 
-    async def upsert(self, doc_id, document) -> None:
-        # TODO: Implement properly
+    async def upsert(self, vo: str, doc_id: int, document: Any) -> None:
+        index_name = self.index_name(vo, doc_id)
         response = await self.client.update(
-            index=self.index_name(doc_id),
+            index=index_name,
             id=doc_id,
             body={"doc": document, "doc_as_upsert": True},
             params=dict(retry_on_conflict=10),
         )
-        print(f"{response=}")
+        logger.debug(
+            "Upserted document %s in index %s with response: %s",
+            doc_id,
+            index_name,
+            response,
+        )
 
     async def search(
         self, parameters, search, sorts, *, per_page: int = 100, page: int | None = None

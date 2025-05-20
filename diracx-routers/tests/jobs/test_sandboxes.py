@@ -5,12 +5,12 @@ import secrets
 from copy import deepcopy
 from io import BytesIO
 
+import httpx
 import pytest
-import requests
 from fastapi.testclient import TestClient
 
+from diracx.core.settings import AuthSettings
 from diracx.routers.auth.token import create_token
-from diracx.routers.utils.users import AuthSettings
 
 pytestmark = pytest.mark.enabled_dependencies(
     [
@@ -24,12 +24,6 @@ pytestmark = pytest.mark.enabled_dependencies(
         "DevelopmentSettings",
     ]
 )
-
-
-@pytest.fixture
-def normal_user_client(client_factory):
-    with client_factory.normal_user() as client:
-        yield client
 
 
 def test_upload_then_download(
@@ -57,7 +51,7 @@ def test_upload_then_download(
 
     # Actually upload the file
     files = {"file": ("file", BytesIO(data))}
-    r = requests.post(upload_info["url"], data=upload_info["fields"], files=files)
+    r = httpx.post(upload_info["url"], data=upload_info["fields"], files=files)
     assert r.status_code == 204, r.text
 
     # Make sure we can download it and get the same data back
@@ -65,7 +59,7 @@ def test_upload_then_download(
     assert r.status_code == 200, r.text
     download_info = r.json()
     assert download_info["expires_in"] > 5
-    r = requests.get(download_info["url"])
+    r = httpx.get(download_info["url"])
     assert r.status_code == 200, r.text
     assert r.content == data
 
@@ -130,7 +124,7 @@ def test_assign_then_unassign_sandboxes_to_jobs(normal_user_client: TestClient):
 
     # Submit a job:
     job_definitions = [TEST_JDL]
-    r = normal_user_client.post("/api/jobs/", json=job_definitions)
+    r = normal_user_client.post("/api/jobs/jdl", json=job_definitions)
     assert r.status_code == 200, r.json()
     assert len(r.json()) == len(job_definitions)
     job_id = r.json()[0]["JobID"]
@@ -225,7 +219,7 @@ def test_malformed_request_to_get_job_sandbox(normal_user_client: TestClient):
     """Test that a malformed request to get a job sandbox returns an information to help user."""
     # Submit a job:
     job_definitions = [TEST_JDL]
-    r = normal_user_client.post("/api/jobs/", json=job_definitions)
+    r = normal_user_client.post("/api/jobs/jdl", json=job_definitions)
     assert r.status_code == 200, r.json()
     assert len(r.json()) == len(job_definitions)
     job_id = r.json()[0]["JobID"]
@@ -240,7 +234,7 @@ def test_get_empty_job_sandboxes(normal_user_client: TestClient):
     """Test that we can get the sandboxes of a job that has no sandboxes assigned."""
     # Submit a job:
     job_definitions = [TEST_JDL]
-    r = normal_user_client.post("/api/jobs/", json=job_definitions)
+    r = normal_user_client.post("/api/jobs/jdl", json=job_definitions)
     assert r.status_code == 200, r.json()
     assert len(r.json()) == len(job_definitions)
     job_id = r.json()[0]["JobID"]
@@ -249,3 +243,64 @@ def test_get_empty_job_sandboxes(normal_user_client: TestClient):
     r = normal_user_client.get(f"/api/jobs/{job_id}/sandbox")
     assert r.status_code == 200
     assert r.json() == {"Input": [None], "Output": [None]}
+
+
+def test_assign_nonexisting_sb_to_job(normal_user_client: TestClient):
+    """Test that we cannot assign a non-existing sandbox to a job."""
+    # Submit a job:
+    job_definitions = [TEST_JDL]
+    r = normal_user_client.post("/api/jobs/jdl", json=job_definitions)
+    assert r.status_code == 200, r.json()
+    assert len(r.json()) == len(job_definitions)
+    job_id = r.json()[0]["JobID"]
+
+    # Malformed request:
+    r = normal_user_client.patch(
+        f"/api/jobs/{job_id}/sandbox/output",
+        json="/S3/pathto/vo/vo_group/user/sha256:55967b0c430058c3105472b1edae6c8987c65bcf01ef58f10a3f5e93948782d8.tar.bz2",
+    )
+    assert r.status_code == 400
+
+
+def test_assign_sb_to_job_twice(normal_user_client: TestClient):
+    """Test that we cannot assign a sandbox to a job twice."""
+    data = secrets.token_bytes(512)
+    checksum = hashlib.sha256(data).hexdigest()
+
+    # Upload Sandbox:
+    r = normal_user_client.post(
+        "/api/jobs/sandbox",
+        json={
+            "checksum_algorithm": "sha256",
+            "checksum": checksum,
+            "size": len(data),
+            "format": "tar.bz2",
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    upload_info = r.json()
+    assert upload_info["url"]
+    sandbox_pfn = upload_info["pfn"]
+    assert sandbox_pfn.startswith("SB:SandboxSE|/S3/")
+
+    # Submit a job:
+    job_definitions = [TEST_JDL]
+    r = normal_user_client.post("/api/jobs/jdl", json=job_definitions)
+    assert r.status_code == 200, r.json()
+    assert len(r.json()) == len(job_definitions)
+    job_id = r.json()[0]["JobID"]
+
+    # Assign sandbox to the job: first attempt should be successful
+    r = normal_user_client.patch(
+        f"/api/jobs/{job_id}/sandbox/output",
+        json=sandbox_pfn,
+    )
+    assert r.status_code == 200
+
+    # Assign sandbox to the job: second attempt should fail
+    r = normal_user_client.patch(
+        f"/api/jobs/{job_id}/sandbox/output",
+        json=sandbox_pfn,
+    )
+    assert r.status_code == 400

@@ -42,8 +42,8 @@ class MockOSDBMixin:
         from diracx.db.sql.utils import DateNowColumn
 
         # Dynamically create a subclass of BaseSQLDB so we get clearer errors
-        MockedDB = type(f"Mocked{self.__class__.__name__}", (sql_utils.BaseSQLDB,), {})
-        self._sql_db = MockedDB(connection_kwargs["sqlalchemy_dsn"])
+        mocked_db = type(f"Mocked{self.__class__.__name__}", (sql_utils.BaseSQLDB,), {})
+        self._sql_db = mocked_db(connection_kwargs["sqlalchemy_dsn"])
 
         # Dynamically create the table definition based on the fields
         columns = [
@@ -53,16 +53,16 @@ class MockOSDBMixin:
         for field, field_type in self.fields.items():
             match field_type["type"]:
                 case "date":
-                    ColumnType = DateNowColumn
+                    column_type = DateNowColumn
                 case "long":
-                    ColumnType = partial(Column, type_=Integer)
+                    column_type = partial(Column, type_=Integer)
                 case "keyword":
-                    ColumnType = partial(Column, type_=String(255))
+                    column_type = partial(Column, type_=String(255))
                 case "text":
-                    ColumnType = partial(Column, type_=String(64 * 1024))
+                    column_type = partial(Column, type_=String(64 * 1024))
                 case _:
                     raise NotImplementedError(f"Unknown field type: {field_type=}")
-            columns.append(ColumnType(field, default=None))
+            columns.append(column_type(field, default=None))
         self._sql_db.metadata = MetaData()
         self._table = Table("dummy", self._sql_db.metadata, *columns)
 
@@ -72,18 +72,22 @@ class MockOSDBMixin:
             yield
 
     async def __aenter__(self):
-        await self._sql_db.__aenter__()
+        """Enter the request context.
+
+        This is a no-op as the real OpenSearch class doesn't use transactions.
+        Instead we enter a transaction in each method that needs it.
+        """
         return self
 
     async def __aexit__(self, exc_type, exc_value, traceback):
-        await self._sql_db.__aexit__(exc_type, exc_value, traceback)
+        pass
 
     async def create_index_template(self) -> None:
         async with self._sql_db.engine.begin() as conn:
             await conn.run_sync(self._sql_db.metadata.create_all)
 
-    async def upsert(self, doc_id, document) -> None:
-        async with self:
+    async def upsert(self, vo, doc_id, document) -> None:
+        async with self._sql_db:
             values = {}
             for key, value in document.items():
                 if key in self.fields:
@@ -106,7 +110,7 @@ class MockOSDBMixin:
         per_page: int = 100,
         page: int | None = None,
     ) -> tuple[int, list[dict[Any, Any]]]:
-        async with self:
+        async with self._sql_db:
             # Apply selection
             if parameters:
                 columns = []
@@ -150,7 +154,8 @@ class MockOSDBMixin:
         return results
 
     async def ping(self):
-        return await self._sql_db.ping()
+        async with self._sql_db:
+            return await self._sql_db.ping()
 
 
 def fake_available_osdb_implementations(name, *, real_available_implementations):
@@ -158,6 +163,6 @@ def fake_available_osdb_implementations(name, *, real_available_implementations)
 
     # Dynamically generate a class that inherits from the first implementation
     # but that also has the MockOSDBMixin
-    MockParameterDB = type(name, (MockOSDBMixin, implementations[0]), {})
+    mock_parameter_db = type(name, (MockOSDBMixin, implementations[0]), {})
 
-    return [MockParameterDB] + implementations
+    return [mock_parameter_db] + implementations

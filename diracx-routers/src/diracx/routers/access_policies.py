@@ -2,7 +2,7 @@
 
 We define a set of Policy classes (WMS, DFC, etc).
 They have a default implementation in diracx.
-If an extension wants to change it, it can be overwriten in the entry point
+If an extension wants to change it, it can be overwritten in the entry point
 diracx.access_policies
 
 Each route should either:
@@ -27,14 +27,20 @@ from typing import Annotated, Self
 from fastapi import Depends
 
 from diracx.core.extensions import select_from_extension
+from diracx.core.models import (
+    AccessTokenPayload,
+    RefreshTokenPayload,
+)
 from diracx.routers.dependencies import DevelopmentSettings
 from diracx.routers.utils.users import AuthorizedUserInfo, verify_dirac_access_token
 
-# FastAPI bug:
-# We normally would use `from __future__ import annotations`
-# but a bug in FastAPI prevents us from doing so
-# https://github.com/tiangolo/fastapi/pull/11355
-# Until it is merged, we can work around it by using strings.
+if "annotations" in globals():
+    raise NotImplementedError(
+        "FastAPI bug: We normally would use `from __future__ import annotations` "
+        "but a bug in FastAPI prevents us from doing so "
+        "https://github.com/tiangolo/fastapi/pull/11355 "
+        "Until it is merged, we can work around it by using strings."
+    )
 
 
 class BaseAccessPolicy(metaclass=ABCMeta):
@@ -86,7 +92,9 @@ class BaseAccessPolicy(metaclass=ABCMeta):
         return
 
     @staticmethod
-    def enrich_tokens(access_payload: dict, refresh_payload: dict) -> tuple[dict, dict]:
+    def enrich_tokens(
+        access_payload: AccessTokenPayload, refresh_payload: RefreshTokenPayload
+    ) -> tuple[dict, dict]:
         """This method is called when issuing a token, and can add whatever
         content it wants inside the access or refresh payload.
 
@@ -125,15 +133,18 @@ def check_permissions(
     finally:
 
         if not has_been_called:
-            # TODO nice error message with inspect
-            # That should really not happen
-            print(
-                "THIS SHOULD NOT HAPPEN, ALWAYS VERIFY PERMISSION",
-                "(PS: I hope you are in a CI)",
-                flush=True,
-            )
             # If enable, just crash, meanly
             if dev_settings.crash_on_missed_access_policy:
+
+                # TODO nice error message with inspect
+                # It would also be nice to print it when there's a real
+                # problem, not when we get 402
+                # see https://github.com/DIRACGrid/diracx/issues/275
+                print(
+                    "THIS SHOULD NOT HAPPEN, ALWAYS VERIFY PERMISSION",
+                    "(PS: I hope you are in a CI)",
+                    flush=True,
+                )
                 # Sleep a bit to make sure the flush happened
                 time.sleep(1)
                 os._exit(1)

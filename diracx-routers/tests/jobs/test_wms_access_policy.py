@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException, status
 
 from diracx.core.properties import JOB_ADMINISTRATOR, NORMAL_USER
-from diracx.routers.job_manager.access_policies import (
+from diracx.routers.jobs.access_policies import (
     ActionType,
     SandboxAccessPolicy,
     WMSAccessPolicy,
@@ -21,18 +23,23 @@ base_payload = {
 }
 
 
-class FakeDB:
+class FakeJobDB:
     async def summary(self, *args): ...
+
+
+class FakeSBMetadataDB:
+    async def get_owner_id(self, *args): ...
+    async def get_sandbox_owner_id(self, *args): ...
 
 
 @pytest.fixture
 def job_db():
-    yield FakeDB()
+    yield FakeJobDB()
 
 
 @pytest.fixture
-def sandbox_db():
-    yield FakeDB()
+def sandbox_metadata_db():
+    yield FakeSBMetadataDB()
 
 
 WMS_POLICY_NAME = "WMSAccessPolicy_AlthoughItDoesNotMatter"
@@ -216,6 +223,7 @@ async def test_wms_access_policy_read_modify(job_db, monkeypatch):
             )
 
 
+SE_NAME = "ProductionSEName"
 SANDBOX_PREFIX = "/S3/bucket_name/myvo/mygroup/mypreferred_username"
 USER_SANDBOX_PFN = f"{SANDBOX_PREFIX}/mysandbox.tar.gz"
 OTHER_USER_SANDBOX_PFN = (
@@ -223,25 +231,17 @@ OTHER_USER_SANDBOX_PFN = (
 )
 
 
-async def test_sandbox_access_policy_create(sandbox_db):
+async def test_sandbox_access_policy_create(sandbox_metadata_db):
 
     admin_user = AuthorizedUserInfo(properties=[JOB_ADMINISTRATOR], **base_payload)
     normal_user = AuthorizedUserInfo(properties=[NORMAL_USER], **base_payload)
 
-    # sandbox_metadata_db and pfns are mandatory parameters
+    # action is a mandatory parameter
     with pytest.raises(AssertionError):
         await SandboxAccessPolicy.policy(
             SANDBOX_POLICY_NAME,
             normal_user,
-            action=ActionType.CREATE,
-            sandbox_metadata_db=sandbox_db,
-        )
-    with pytest.raises(AssertionError):
-        await SandboxAccessPolicy.policy(
-            SANDBOX_POLICY_NAME,
-            normal_user,
-            action=ActionType.CREATE,
-            pfns=[USER_SANDBOX_PFN],
+            sandbox_metadata_db=sandbox_metadata_db,
         )
 
     # An admin cannot create any resource
@@ -250,7 +250,7 @@ async def test_sandbox_access_policy_create(sandbox_db):
             SANDBOX_POLICY_NAME,
             admin_user,
             action=ActionType.CREATE,
-            sandbox_metadata_db=sandbox_db,
+            sandbox_metadata_db=sandbox_metadata_db,
             pfns=[USER_SANDBOX_PFN],
         )
 
@@ -259,14 +259,14 @@ async def test_sandbox_access_policy_create(sandbox_db):
         SANDBOX_POLICY_NAME,
         normal_user,
         action=ActionType.CREATE,
-        sandbox_metadata_db=sandbox_db,
+        sandbox_metadata_db=sandbox_metadata_db,
         pfns=[USER_SANDBOX_PFN],
     )
 
     ##############
 
 
-async def test_sandbox_access_policy_read(sandbox_db):
+async def test_sandbox_access_policy_read(sandbox_metadata_db, monkeypatch):
 
     admin_user = AuthorizedUserInfo(properties=[JOB_ADMINISTRATOR], **base_payload)
     normal_user = AuthorizedUserInfo(properties=[NORMAL_USER], **base_payload)
@@ -275,18 +275,20 @@ async def test_sandbox_access_policy_read(sandbox_db):
         SANDBOX_POLICY_NAME,
         admin_user,
         action=ActionType.READ,
-        sandbox_metadata_db=sandbox_db,
+        sandbox_metadata_db=sandbox_metadata_db,
         pfns=[USER_SANDBOX_PFN],
         required_prefix=SANDBOX_PREFIX,
+        se_name=SE_NAME,
     )
 
     await SandboxAccessPolicy.policy(
         SANDBOX_POLICY_NAME,
         admin_user,
         action=ActionType.READ,
-        sandbox_metadata_db=sandbox_db,
+        sandbox_metadata_db=sandbox_metadata_db,
         pfns=[OTHER_USER_SANDBOX_PFN],
         required_prefix=SANDBOX_PREFIX,
+        se_name=SE_NAME,
     )
 
     # need required_prefix for READ
@@ -295,27 +297,67 @@ async def test_sandbox_access_policy_read(sandbox_db):
             SANDBOX_POLICY_NAME,
             normal_user,
             action=ActionType.READ,
-            sandbox_metadata_db=sandbox_db,
+            sandbox_metadata_db=sandbox_metadata_db,
             pfns=[USER_SANDBOX_PFN],
         )
 
+    # need se_name for READ
+    with pytest.raises(NotImplementedError):
+        await SandboxAccessPolicy.policy(
+            SANDBOX_POLICY_NAME,
+            normal_user,
+            action=ActionType.READ,
+            sandbox_metadata_db=sandbox_metadata_db,
+            pfns=[USER_SANDBOX_PFN],
+            required_prefix=SANDBOX_PREFIX,
+        )
+
     # User can act on his own sandbox
+    async def get_owner_id(*args):
+        return 1
+
+    async def get_sandbox_owner_id(*args):
+        return 1
+
+    monkeypatch.setattr(sandbox_metadata_db, "get_owner_id", get_owner_id)
+    monkeypatch.setattr(
+        sandbox_metadata_db, "get_sandbox_owner_id", get_sandbox_owner_id
+    )
+
     await SandboxAccessPolicy.policy(
         SANDBOX_POLICY_NAME,
         normal_user,
         action=ActionType.READ,
-        sandbox_metadata_db=sandbox_db,
+        sandbox_metadata_db=sandbox_metadata_db,
         pfns=[USER_SANDBOX_PFN],
         required_prefix=SANDBOX_PREFIX,
+        se_name=SE_NAME,
     )
 
     # User cannot act on others
+    async def get_owner_id(*args):
+        return 2
+
+    monkeypatch.setattr(sandbox_metadata_db, "get_owner_id", get_owner_id)
+
     with pytest.raises(HTTPException):
         await SandboxAccessPolicy.policy(
             SANDBOX_POLICY_NAME,
             normal_user,
             action=ActionType.READ,
-            sandbox_metadata_db=sandbox_db,
+            sandbox_metadata_db=sandbox_metadata_db,
             pfns=[OTHER_USER_SANDBOX_PFN],
             required_prefix=SANDBOX_PREFIX,
+            se_name=SE_NAME,
+        )
+
+    with pytest.raises(HTTPException):
+        await SandboxAccessPolicy.policy(
+            SANDBOX_POLICY_NAME,
+            normal_user,
+            action=ActionType.READ,
+            sandbox_metadata_db=sandbox_metadata_db,
+            pfns=[USER_SANDBOX_PFN],
+            required_prefix=SANDBOX_PREFIX,
+            se_name="OTHER_SE_NAME",
         )

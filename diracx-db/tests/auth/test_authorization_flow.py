@@ -49,7 +49,7 @@ async def test_insert_id_token(auth_db: AuthDB):
         with pytest.raises(NoResultFound):
             await auth_db.get_authorization_flow(code, EXPIRED)
         res = await auth_db.get_authorization_flow(code, MAX_VALIDITY)
-        assert res["id_token"] == id_token
+        assert res["IDToken"] == id_token
 
     # Cannot add a id_token after finishing the flow
     async with auth_db as auth_db:
@@ -57,11 +57,6 @@ async def test_insert_id_token(auth_db: AuthDB):
             await auth_db.authorization_flow_insert_id_token(
                 uuid, id_token, MAX_VALIDITY
             )
-
-    # We shouldn't be able to retrieve it twice
-    async with auth_db as auth_db:
-        with pytest.raises(AuthorizationError, match="already used"):
-            res = await auth_db.get_authorization_flow(code, MAX_VALIDITY)
 
 
 async def test_insert(auth_db: AuthDB):

@@ -7,9 +7,10 @@ from datetime import datetime
 import pytest
 import sqlalchemy
 
+from diracx.core.exceptions import SandboxAlreadyInsertedError, SandboxNotFoundError
 from diracx.core.models import SandboxInfo, UserInfo
 from diracx.db.sql.sandbox_metadata.db import SandboxMetadataDB
-from diracx.db.sql.sandbox_metadata.schema import sb_EntityMapping, sb_SandBoxes
+from diracx.db.sql.sandbox_metadata.schema import SandBoxes, SBEntityMapping
 
 
 @pytest.fixture
@@ -39,6 +40,7 @@ def test_get_pfn(sandbox_metadata_db: SandboxMetadataDB):
 
 
 async def test_insert_sandbox(sandbox_metadata_db: SandboxMetadataDB):
+    # TODO: DAL tests should be very simple, such complex tests should be handled in diracx-routers
     user_info = UserInfo(
         sub="vo:sub", preferred_username="user1", dirac_group="group1", vo="vo"
     )
@@ -48,19 +50,27 @@ async def test_insert_sandbox(sandbox_metadata_db: SandboxMetadataDB):
     db_contents = await _dump_db(sandbox_metadata_db)
     assert pfn1 not in db_contents
     async with sandbox_metadata_db:
-        with pytest.raises(sqlalchemy.exc.NoResultFound):
+        with pytest.raises(SandboxNotFoundError):
             await sandbox_metadata_db.sandbox_is_assigned(pfn1, "SandboxSE")
+
+    # Insert owner
+    async with sandbox_metadata_db:
+        owner_id = await sandbox_metadata_db.insert_owner(user_info)
+    assert owner_id == 1
 
     # Insert the sandbox
     async with sandbox_metadata_db:
-        await sandbox_metadata_db.insert_sandbox("SandboxSE", user_info, pfn1, 100)
+        await sandbox_metadata_db.insert_sandbox(owner_id, "SandboxSE", pfn1, 100)
     db_contents = await _dump_db(sandbox_metadata_db)
     owner_id1, last_access_time1 = db_contents[pfn1]
 
-    # Inserting again should update the last access time
     await asyncio.sleep(1)  # The timestamp only has second precision
     async with sandbox_metadata_db:
-        await sandbox_metadata_db.insert_sandbox("SandboxSE", user_info, pfn1, 100)
+        with pytest.raises(SandboxAlreadyInsertedError):
+            await sandbox_metadata_db.insert_sandbox(owner_id, "SandboxSE", pfn1, 100)
+
+        await sandbox_metadata_db.update_sandbox_last_access_time("SandboxSE", pfn1)
+
     db_contents = await _dump_db(sandbox_metadata_db)
     owner_id2, last_access_time2 = db_contents[pfn1]
     assert owner_id1 == owner_id2
@@ -89,7 +99,7 @@ async def _dump_db(
     """
     async with sandbox_metadata_db:
         stmt = sqlalchemy.select(
-            sb_SandBoxes.SEPFN, sb_SandBoxes.OwnerId, sb_SandBoxes.LastAccessTime
+            SandBoxes.SEPFN, SandBoxes.OwnerId, SandBoxes.LastAccessTime
         )
         res = await sandbox_metadata_db.conn.execute(stmt)
         return {row.SEPFN: (row.OwnerId, row.LastAccessTime) for row in res}
@@ -98,6 +108,7 @@ async def _dump_db(
 async def test_assign_and_unsassign_sandbox_to_jobs(
     sandbox_metadata_db: SandboxMetadataDB,
 ):
+    # TODO: DAL tests should be very simple, such complex tests should be handled in diracx-routers
     pfn = secrets.token_hex()
     user_info = UserInfo(
         sub="vo:sub", preferred_username="user1", dirac_group="group1", vo="vo"
@@ -106,10 +117,11 @@ async def test_assign_and_unsassign_sandbox_to_jobs(
     sandbox_se = "SandboxSE"
     # Insert the sandbox
     async with sandbox_metadata_db:
-        await sandbox_metadata_db.insert_sandbox(sandbox_se, user_info, pfn, 100)
+        owner_id = await sandbox_metadata_db.insert_owner(user_info)
+        await sandbox_metadata_db.insert_sandbox(owner_id, sandbox_se, pfn, 100)
 
     async with sandbox_metadata_db:
-        stmt = sqlalchemy.select(sb_SandBoxes.SBId, sb_SandBoxes.SEPFN)
+        stmt = sqlalchemy.select(SandBoxes.SBId, SandBoxes.SEPFN)
         res = await sandbox_metadata_db.conn.execute(stmt)
     db_contents = {row.SEPFN: row.SBId for row in res}
     sb_id_1 = db_contents[pfn]
@@ -120,7 +132,7 @@ async def test_assign_and_unsassign_sandbox_to_jobs(
     # Check there is no mapping
     async with sandbox_metadata_db:
         stmt = sqlalchemy.select(
-            sb_EntityMapping.SBId, sb_EntityMapping.EntityId, sb_EntityMapping.Type
+            SBEntityMapping.SBId, SBEntityMapping.EntityId, SBEntityMapping.Type
         )
         res = await sandbox_metadata_db.conn.execute(stmt)
     db_contents = {row.SBId: (row.EntityId, row.Type) for row in res}
@@ -134,7 +146,7 @@ async def test_assign_and_unsassign_sandbox_to_jobs(
     # Check if sandbox and job are mapped
     async with sandbox_metadata_db:
         stmt = sqlalchemy.select(
-            sb_EntityMapping.SBId, sb_EntityMapping.EntityId, sb_EntityMapping.Type
+            SBEntityMapping.SBId, SBEntityMapping.EntityId, SBEntityMapping.Type
         )
         res = await sandbox_metadata_db.conn.execute(stmt)
     db_contents = {row.SBId: (row.EntityId, row.Type) for row in res}
@@ -144,7 +156,7 @@ async def test_assign_and_unsassign_sandbox_to_jobs(
     assert sb_type == "Output"
 
     async with sandbox_metadata_db:
-        stmt = sqlalchemy.select(sb_SandBoxes.SBId, sb_SandBoxes.SEPFN)
+        stmt = sqlalchemy.select(SandBoxes.SBId, SandBoxes.SEPFN)
         res = await sandbox_metadata_db.conn.execute(stmt)
     db_contents = {row.SEPFN: row.SBId for row in res}
     sb_id_1 = db_contents[pfn]
@@ -158,8 +170,8 @@ async def test_assign_and_unsassign_sandbox_to_jobs(
 
     # Entity should not exists anymore
     async with sandbox_metadata_db:
-        stmt = sqlalchemy.select(sb_EntityMapping.SBId).where(
-            sb_EntityMapping.EntityId == entity_id_1
+        stmt = sqlalchemy.select(SBEntityMapping.SBId).where(
+            SBEntityMapping.EntityId == entity_id_1
         )
         res = await sandbox_metadata_db.conn.execute(stmt)
     entity_sb_id = [row.SBId for row in res]
@@ -170,7 +182,31 @@ async def test_assign_and_unsassign_sandbox_to_jobs(
         assert await sandbox_metadata_db.sandbox_is_assigned(pfn, sandbox_se) is False
     # Check the mapping has been deleted
     async with sandbox_metadata_db:
-        stmt = sqlalchemy.select(sb_EntityMapping.SBId)
+        stmt = sqlalchemy.select(SBEntityMapping.SBId)
         res = await sandbox_metadata_db.conn.execute(stmt)
     res_sb_id = [row.SBId for row in res]
     assert sb_id_1 not in res_sb_id
+
+
+async def test_get_sandbox_owner_id(sandbox_metadata_db: SandboxMetadataDB):
+    user_info = UserInfo(
+        sub="vo:sub", preferred_username="user1", dirac_group="group1", vo="vo"
+    )
+    pfn = secrets.token_hex()
+    sandbox_se = "SandboxSE"
+    # Insert the sandbox
+    async with sandbox_metadata_db:
+        owner_id = await sandbox_metadata_db.insert_owner(user_info)
+        await sandbox_metadata_db.insert_sandbox(owner_id, sandbox_se, pfn, 100)
+
+    async with sandbox_metadata_db:
+        sb_owner_id = await sandbox_metadata_db.get_sandbox_owner_id(pfn, sandbox_se)
+
+    assert owner_id == 1
+    assert sb_owner_id == owner_id
+
+    async with sandbox_metadata_db:
+        sb_owner_id = await sandbox_metadata_db.get_sandbox_owner_id(
+            "not_found", sandbox_se
+        )
+    assert sb_owner_id is None
