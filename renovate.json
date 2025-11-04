@@ -2,5 +2,17 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "diracx-testing\\/src\\/diracx\\/testing\\/scripts\\/client_generation\\.py"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\w+)\\sversioning=(?<versioning>\\w+)\\sdepName=(?<depName>[@\\w/]+)\\s*\\w+\\s*=\\s*[\"'](?<currentValue>[0-9.]+[\"'])\\s",
+        "# renovate: datasource=(?<datasource>\\w+)\\sversioning=(?<versioning>\\w+)\\s*[\"'](?<depName>[\\w@/]+)[\"']:\\s*[\"'](?<currentValue>[0-9.]+)[\"'],?\\s"
+      ]
+    }
   ]
 }
