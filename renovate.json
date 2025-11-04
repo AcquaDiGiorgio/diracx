@@ -3,6 +3,7 @@
   "extends": [
     "config:recommended"
   ],
+  "prHeader": "# IF THE JSON WAS CACHED, THIS WON'T APPEAR :(",
   "customManagers": [
     {
       "customType": "regex",
