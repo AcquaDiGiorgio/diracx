@@ -43,7 +43,7 @@ jobs:
       - name: Run pytest
         run: pixi run pytest-${{ matrix.package }} --cov-report=xml:coverage.xml --junitxml=report.xml
       - name: Upload coverage report
-        uses: codecov/codecov-action@v5.4.2
+        uses: codecov/codecov-action@v5.5.1
 
   client-generation:
     runs-on: ubuntu-latest
