@@ -3,16 +3,41 @@
   "extends": [
     "config:recommended"
   ],
-  "prHeader": "# IF THE JSON WAS CACHED, THIS WON'T APPEAR :(",
   "customManagers": [
     {
       "customType": "regex",
       "managerFilePatterns": [
-        "diracx-testing\\/src\\/diracx\\/testing\\/scripts\\/client_generation\\.py"
+        "diracx-testing\\/src\\/diracx\\/testing\\/client_generation\\.py"
       ],
+      "versioningTemplate": "npm",
+      "datasourceTemplate": "npm",
+      "depNameTemplate": "autorest",
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>\\w+)\\sversioning=(?<versioning>\\w+)\\sdepName=(?<depName>[@\\w/]+)\\s*\\w+\\s*=\\s*[\"'](?<currentValue>[0-9.]+[\"'])\\s",
-        "# renovate: datasource=(?<datasource>\\w+)\\sversioning=(?<versioning>\\w+)\\s*[\"'](?<depName>[\\w@/]+)[\"']:\\s*[\"'](?<currentValue>[0-9.]+)[\"'],?\\s"
+        "AUTOREST_VERSION\\s*=\\s*[\"'](?<currentValue>\\S+)[\"']"
+      ]
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "diracx-testing\\/src\\/diracx\\/testing\\/client_generation\\.py"
+      ],
+      "versioningTemplate": "npm",
+      "datasourceTemplate": "npm",
+      "depNameTemplate": "@autorest/core",
+      "matchStrings": [
+        "AUTOREST_CORE_VERSION\\s*=\\s*[\"'](?<currentValue>\\S+)[\"']"
+      ]
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "diracx-testing\\/src\\/diracx\\/testing\\/client_generation\\.py"
+      ],
+      "versioningTemplate": "npm",
+      "datasourceTemplate": "npm",
+      "matchStrings": [
+        "AUTOREST_PUGINS\\s*=\\s*{[^}]*}",
+        "\\s*[\"'](?<depName>\\S+)[\"']:\\s*[\"'](?<currentValue>\\S+)[\"'],?"
       ]
     }
   ]

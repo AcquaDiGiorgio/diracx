@@ -18,14 +18,10 @@ from urllib.parse import urlparse
 
 import git
 
-# renovate: datasource=npm versioning=npm depName=autorest
 AUTOREST_VERSION = "3.7.1"
-# renovate: datasource=npm versioning=npm depName=@autorest/core
 AUTOREST_CORE_VERSION = "3.10.4"
 AUTOREST_PUGINS = {
-    # renovate: datasource=npm versioning=npm
     "@autorest/python": "6.34.2",
-    # renovate: datasource=npm versioning=npm
     "@autorest/modelerfour": "4.23.7",
 }
 
