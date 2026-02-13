@@ -156,7 +156,7 @@ def regenerate_client(openapi_spec: Path, client_module: str):
         )
 
     cmd = ["autorest", f"--version={AUTOREST_CORE_VERSION}"]
-    for plugin, version in AUTOREST_PUGINS.items():
+    for plugin, version in AUTOREST_PLUGINS.items():
         cmd.append(f"--use={plugin}@{version}")
     cmd += [
         "--python",
