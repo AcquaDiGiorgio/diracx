@@ -10,7 +10,7 @@
     },
     {
       "description": "Group all Autorest updates together",
-      "matchPackageNames": ["autorest"],
+      "matchDepNames": ["autorest"],
       "groupName": "Autorest"
     }
   ],
