@@ -4,11 +4,6 @@
   "minimumReleaseAge": "7 days",
   "packageRules": [
     {
-      "description": "Group all GitHub Actions updates together",
-      "matchManagers": ["github-actions"],
-      "groupName": "GitHub Actions"
-    },
-    {
       "description": "Group all Autorest updates together",
       "matchDepNames": ["autorest"],
       "groupName": "Autorest"
