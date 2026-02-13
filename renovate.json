@@ -2,13 +2,6 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
   "minimumReleaseAge": "7 days",
-  "packageRules": [
-    {
-      "description": "Group all Autorest updates together",
-      "matchDepNames": ["autorest"],
-      "groupName": "Autorest"
-    }
-  ],
   "customManagers": [
     {
       "customType": "regex",
@@ -45,6 +38,18 @@
         "AUTOREST_PLUGINS\\s*=\\s*{[^}]*}",
         "\\s*[\"'](?<depName>\\S+)[\"']:\\s*[\"'](?<currentValue>\\S+)[\"'],?"
       ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Group all GitHub Actions updates together",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Group all Autorest updates together",
+      "matchPackageNames": ["*autorest*"],
+      "groupName": "Autorest"
     }
   ]
 }
