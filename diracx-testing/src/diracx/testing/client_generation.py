@@ -20,7 +20,7 @@ import git
 
 AUTOREST_VERSION = "3.7.1"
 AUTOREST_CORE_VERSION = "3.10.4"
-AUTOREST_PUGINS = {
+AUTOREST_PLUGINS = {
     "@autorest/python": "6.34.2",
     "@autorest/modelerfour": "4.23.7",
 }
