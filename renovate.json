@@ -42,9 +42,10 @@
   ],
   "packageRules": [
     {
-      "description": "Group all regex",
+      "description": "Group all Autorest Updates",
       "matchManagers": ["custom.regex"],
-      "groupName": "Test"
+      "matchPackageNames": ["autorest", "@autorest/*"],
+      "groupName": "Autorest"
     }
   ]
 }
