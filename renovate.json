@@ -48,7 +48,8 @@
     },
     {
       "description": "Group all Autorest updates together",
-      "matchPackageNames": ["*autorest*"],
+      "matchDepNames": ["autorest"],
+      "matchManagers": ["custom.regex"],
       "groupName": "Autorest"
     }
   ]
