@@ -42,15 +42,9 @@
   ],
   "packageRules": [
     {
-      "description": "Group all GitHub Actions updates together",
-      "matchManagers": ["github-actions"],
-      "groupName": "GitHub Actions"
-    },
-    {
-      "description": "Group all Autorest updates together",
-      "matchDepNames": ["autorest"],
+      "description": "Group all regex",
       "matchManagers": ["custom.regex"],
-      "groupName": "Autorest"
+      "groupName": "Test"
     }
   ]
 }
