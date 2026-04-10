@@ -47,7 +47,7 @@ export DIRACX_SANDBOX_STORE_S3_CLIENT_KWARGS='{"endpoint_url": "http://localhost
 
 moto_server -p3000 &
 moto_pid=$!
-uvicorn --factory diracx.testing.routers:create_app --reload &
+uvicorn --factory diracx.testing.routers.factory:create_app --reload &
 diracx_pid=$!
 
 success=0
