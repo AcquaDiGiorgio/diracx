@@ -35,7 +35,7 @@ __all__ = [
     "SetJobStatusReturn",
     # Replica Map
     "ReplicaMap",
-    # Sanbox
+    # Sandbox
     "ChecksumAlgorithm",
     "SandboxDownloadResponse",
     "SandboxFormat",
